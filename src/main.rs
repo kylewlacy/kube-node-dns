@@ -112,7 +112,7 @@ async fn update_ips() -> miette::Result<()> {
         .wrap_err("$KUBE_NODE_NAME must be set")?;
 
     let global_ips = get_ips().await?;
-    let global_ips = global_ips.join_with(",").to_string();
+    let global_ip_list = global_ips.join_with(",").to_string();
 
     let kube = kube::Client::try_default()
         .await
@@ -120,6 +120,7 @@ async fn update_ips() -> miette::Result<()> {
         .wrap_err("failed to build Kubernetes client")?;
     let nodes = kube::Api::<k8s_openapi::api::core::v1::Node>::all(kube);
 
+    // Retry in a loop in case we get a write conflict from the Kubernetes API
     let mut retries = MAX_RETRIES;
     loop {
         let mut node_entry = nodes
@@ -131,39 +132,54 @@ async fn update_ips() -> miette::Result<()> {
             miette::bail!("node not found: {node_name:?}");
         };
 
-        node_entry
-            .get_mut()
+        let current_ip_list = node_entry
+            .get()
             .metadata
             .annotations
-            .get_or_insert_default()
-            .insert(GLOBAL_IPS_LABEL.to_string(), global_ips.clone());
+            .as_ref()
+            .and_then(|annotations| annotations.get(GLOBAL_IPS_LABEL));
+        if current_ip_list == Some(&global_ip_list) {
+            tracing::info!(
+                node = node_name,
+                global_ip_list,
+                label = GLOBAL_IPS_LABEL,
+                "node label already up-to-date"
+            );
+        } else {
+            node_entry
+                .get_mut()
+                .metadata
+                .annotations
+                .get_or_insert_default()
+                .insert(GLOBAL_IPS_LABEL.to_string(), global_ip_list.clone());
 
-        let result = node_entry
-            .commit(&kube::api::PostParams {
-                dry_run: false,
-                field_manager: Some(FIELD_MANAGER_NAME.to_string()),
-            })
-            .await;
-        match result {
-            Ok(()) => {
-                tracing::info!(
-                    node = node_name,
-                    global_ips,
-                    label = GLOBAL_IPS_LABEL,
-                    "updated node label with global IPs"
-                );
-                return Ok(());
-            }
-            Err(error) => {
-                let Some(remaining_retries) = retries.checked_sub(1) else {
-                    return Err(error)
-                        .into_diagnostic()
-                        .wrap_err("failed to update node");
-                };
-                retries = remaining_retries;
+            let result = node_entry
+                .commit(&kube::api::PostParams {
+                    dry_run: false,
+                    field_manager: Some(FIELD_MANAGER_NAME.to_string()),
+                })
+                .await;
+            match result {
+                Ok(()) => {
+                    tracing::info!(
+                        node = node_name,
+                        global_ip_list,
+                        label = GLOBAL_IPS_LABEL,
+                        "updated node label with global IPs"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    let Some(remaining_retries) = retries.checked_sub(1) else {
+                        return Err(error)
+                            .into_diagnostic()
+                            .wrap_err("failed to update node");
+                    };
+                    retries = remaining_retries;
 
-                tracing::warn!("request failed, retrying: {error:?}");
-                tokio::time::sleep(RETRY_DELAY).await;
+                    tracing::warn!("request failed, retrying: {error:?}");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
             }
         }
     }
