@@ -6,3 +6,8 @@ export default function kubeNodeLabelGlobalIps(): std.Recipe<std.Directory> {
     source: Brioche.glob("Cargo.lock", "Cargo.toml", "src"),
   });
 }
+
+export const container = std.ociContainerImage({
+  recipe: kubeNodeLabelGlobalIps,
+  entrypoint: ["bin/kube-node-label-global-ips"],
+});
