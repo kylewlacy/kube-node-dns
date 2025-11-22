@@ -171,9 +171,9 @@ async fn update_ips_repeatedly(every: std::time::Duration) -> miette::Result<()>
         .into_diagnostic()
         .wrap_err("failed to install SIGTERM handler")?;
 
-    loop {
-        tracing::info!("updating IPs");
+    tracing::info!("updating IPs every {}", humantime::format_duration(every));
 
+    loop {
         update_ips().await?;
 
         tokio::select! {
@@ -187,6 +187,8 @@ async fn update_ips_repeatedly(every: std::time::Duration) -> miette::Result<()>
                 return Ok(());
             }
             _ = tokio::time::sleep(every) => {
+                tracing::info!("updating IPs after {}", humantime::format_duration(every));
+
                 // Ready to update IPs again
             }
         }
