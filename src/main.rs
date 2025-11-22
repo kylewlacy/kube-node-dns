@@ -24,7 +24,11 @@ async fn main() -> std::process::ExitCode {
 
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .init();
 
     match run(command).await {
