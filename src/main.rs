@@ -145,6 +145,7 @@ async fn update_ips() -> miette::Result<()> {
                 label = GLOBAL_IPS_LABEL,
                 "node label already up-to-date"
             );
+            return Ok(());
         } else {
             node_entry
                 .get_mut()
