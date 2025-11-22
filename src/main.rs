@@ -7,6 +7,8 @@ use network_interface::NetworkInterfaceConfig as _;
 
 const FIELD_MANAGER_NAME: &str = "kube-node-label-global-ips";
 
+const GLOBAL_IPS_LABEL: &str = "external-dns.alpha.kubernetes.io/target";
+
 const MAX_RETRIES: u32 = 10;
 
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
@@ -86,16 +88,16 @@ async fn get_ips() -> miette::Result<HashSet<std::net::IpAddr>> {
                 })
                 .collect::<Vec<_>>();
             if iface_global_ips.is_empty() {
-                tracing::info!(iface = iface.name, "interface has no global IPs");
+                tracing::debug!(iface = iface.name, "interface has no global IPs");
             } else {
-                tracing::info!(iface = iface.name, ips = ?iface_global_ips, "found global IPs from interface");
+                tracing::debug!(iface = iface.name, ips = ?iface_global_ips, "found global IPs from interface");
             }
 
             global_ips.extend(iface_global_ips);
         }
 
         if global_ips.is_empty() {
-            tracing::warn!("no global IPs found!");
+            tracing::warn!("no global IPs found, but proceeding anyway!");
         }
 
         Ok::<_, miette::Error>(global_ips)
@@ -134,10 +136,7 @@ async fn update_ips() -> miette::Result<()> {
             .metadata
             .annotations
             .get_or_insert_default()
-            .insert(
-                "external-dns.alpha.kubernetes.io/target".to_string(),
-                global_ips.clone(),
-            );
+            .insert(GLOBAL_IPS_LABEL.to_string(), global_ips.clone());
 
         let result = node_entry
             .commit(&kube::api::PostParams {
@@ -147,7 +146,12 @@ async fn update_ips() -> miette::Result<()> {
             .await;
         match result {
             Ok(()) => {
-                tracing::info!("updated node label with global IPs");
+                tracing::info!(
+                    node = node_name,
+                    global_ips,
+                    label = GLOBAL_IPS_LABEL,
+                    "updated node label with global IPs"
+                );
                 return Ok(());
             }
             Err(error) => {
