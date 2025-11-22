@@ -21,7 +21,10 @@ enum Command {
 async fn main() -> std::process::ExitCode {
     let command = Command::parse();
 
-    tracing_subscriber::fmt().json().init();
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     match run(command).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
