@@ -1,0 +1,8 @@
+import * as std from "std";
+import { cargoBuild } from "rust";
+
+export default function kubeNodeLabelGlobalIps(): std.Recipe<std.Directory> {
+  return cargoBuild({
+    source: Brioche.glob("Cargo.lock", "Cargo.toml", "src"),
+  });
+}
