@@ -2,12 +2,11 @@ use std::collections::HashSet;
 
 use clap::Parser;
 use joinery::Joinable as _;
+use k8s_openapi::api::core::v1::Node;
 use miette::{Context as _, IntoDiagnostic as _};
 use network_interface::NetworkInterfaceConfig as _;
 
 const FIELD_MANAGER_NAME: &str = "kube-node-annotate-ips";
-
-const IPS_ANNOTATION: &str = "external-dns.alpha.kubernetes.io/target";
 
 const MAX_RETRIES: u32 = 10;
 
@@ -56,14 +55,14 @@ async fn run(command: Command) -> miette::Result<()> {
             }
         }
         Command::Once => {
-            update_ips().await?;
+            update_nodes().await?;
         }
         Command::Repeat { every } => {
             let every = humantime::parse_duration(&every)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("invalid value for repeat: {every:?}"))?;
 
-            update_ips_repeatedly(every).await?;
+            update_nodes_repeatedly(every).await?;
         }
     }
 
@@ -106,19 +105,19 @@ async fn get_ips() -> miette::Result<HashSet<std::net::IpAddr>> {
     Ok(global_ips)
 }
 
-async fn update_ips() -> miette::Result<()> {
+async fn update_nodes() -> miette::Result<()> {
     let node_name = std::env::var("KUBE_NODE_NAME")
         .into_diagnostic()
         .wrap_err("$KUBE_NODE_NAME must be set")?;
-
-    let global_ips = get_ips().await?;
-    let global_ip_list = global_ips.join_with(",").to_string();
+    let node_annotation_ips = std::env::var("KUBE_NODE_ANNOTATION_IPS")
+        .into_diagnostic()
+        .wrap_err("$KUBE_NODE_ANNOTATION_IPS must be set")?;
 
     let kube = kube::Client::try_default()
         .await
         .into_diagnostic()
         .wrap_err("failed to build Kubernetes client")?;
-    let nodes = kube::Api::<k8s_openapi::api::core::v1::Node>::all(kube);
+    let nodes = kube::Api::<Node>::all(kube);
 
     // Retry in a loop in case we get a write conflict from the Kubernetes API
     let mut retries = MAX_RETRIES;
@@ -132,61 +131,76 @@ async fn update_ips() -> miette::Result<()> {
             miette::bail!("node not found: {node_name:?}");
         };
 
-        let current_ip_list = node_entry
-            .get()
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.get(IPS_ANNOTATION));
-        if current_ip_list == Some(&global_ip_list) {
+        let global_ips = get_ips().await?;
+        let global_ip_list = global_ips.join_with(",").to_string();
+
+        if set_annotation(node_entry, &node_annotation_ips, &global_ip_list) {
             tracing::info!(
                 node = node_name,
                 global_ip_list,
-                annotation = IPS_ANNOTATION,
+                annotation = node_annotation_ips,
+                "updated node annotation with IPs"
+            );
+        } else {
+            tracing::info!(
+                node = node_name,
+                global_ip_list,
+                annotation = node_annotation_ips,
                 "node IP annotation already up-to-date"
             );
-            return Ok(());
-        } else {
-            node_entry
-                .get_mut()
-                .metadata
-                .annotations
-                .get_or_insert_default()
-                .insert(IPS_ANNOTATION.to_string(), global_ip_list.clone());
+        }
 
-            let result = node_entry
-                .commit(&kube::api::PostParams {
-                    dry_run: false,
-                    field_manager: Some(FIELD_MANAGER_NAME.to_string()),
-                })
-                .await;
-            match result {
-                Ok(()) => {
-                    tracing::info!(
-                        node = node_name,
-                        global_ip_list,
-                        annotation = IPS_ANNOTATION,
-                        "updated node annotation with global IPs"
-                    );
-                    return Ok(());
-                }
-                Err(error) => {
-                    let Some(remaining_retries) = retries.checked_sub(1) else {
-                        return Err(error)
-                            .into_diagnostic()
-                            .wrap_err("failed to update node");
-                    };
-                    retries = remaining_retries;
+        let result = node_entry
+            .commit(&kube::api::PostParams {
+                dry_run: false,
+                field_manager: Some(FIELD_MANAGER_NAME.to_string()),
+            })
+            .await;
+        match result {
+            Ok(()) => {
+                return Ok(());
+            }
+            Err(error) => {
+                let Some(remaining_retries) = retries.checked_sub(1) else {
+                    return Err(error)
+                        .into_diagnostic()
+                        .wrap_err("failed to update node");
+                };
+                retries = remaining_retries;
 
-                    tracing::warn!("request failed, retrying: {error:?}");
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
+                tracing::warn!("request failed, retrying: {error:?}");
+                tokio::time::sleep(RETRY_DELAY).await;
             }
         }
     }
 }
 
-async fn update_ips_repeatedly(every: std::time::Duration) -> miette::Result<()> {
+fn set_annotation(
+    entry: &mut kube::api::entry::OccupiedEntry<Node>,
+    annotation: &str,
+    value: &str,
+) -> bool {
+    let current_value = entry
+        .get()
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(annotation))
+        .map(|value| &**value);
+    if current_value == Some(value) {
+        return false;
+    }
+
+    entry
+        .get_mut()
+        .metadata
+        .annotations
+        .get_or_insert_default()
+        .insert(annotation.to_string(), value.to_string());
+    true
+}
+
+async fn update_nodes_repeatedly(every: std::time::Duration) -> miette::Result<()> {
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .into_diagnostic()
@@ -195,7 +209,7 @@ async fn update_ips_repeatedly(every: std::time::Duration) -> miette::Result<()>
     tracing::info!("updating IPs every {}", humantime::format_duration(every));
 
     loop {
-        update_ips().await?;
+        update_nodes().await?;
 
         tokio::select! {
             result = &mut ctrl_c => {
