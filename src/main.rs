@@ -23,7 +23,7 @@ enum Command {
     PublishDns {
         #[arg(long = "domain", num_args(1..))]
         domains: Vec<String>,
-        #[arg(long = "domain")]
+        #[arg(long)]
         node_label_selector: Option<String>,
     },
 }
