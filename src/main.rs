@@ -302,6 +302,7 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
         domains,
         nodes: HashMap::new(),
     };
+    let mut pending_changes = false;
 
     let mut node_watch_config = kube::runtime::watcher::Config::default();
     if let Some(node_selector) = node_selector {
@@ -319,27 +320,37 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
             }
         };
 
-        let result = state.handle_event(&event);
-        let did_change = match result {
-            Ok(did_change) => did_change,
-            Err(error) => {
-                tracing::error!("error when handling node event: {error:?}");
-                continue;
-            }
-        };
-
         let is_current = match event {
-            kube::runtime::watcher::Event::Apply(_) | kube::runtime::watcher::Event::Delete(_) => {
-                true
+            kube::runtime::watcher::Event::Apply(_)
+            | kube::runtime::watcher::Event::Delete(_)
+            | kube::runtime::watcher::Event::InitDone => true,
+            kube::runtime::watcher::Event::Init | kube::runtime::watcher::Event::InitApply(_) => {
+                false
             }
-            kube::runtime::watcher::Event::Init
-            | kube::runtime::watcher::Event::InitApply(_)
-            | kube::runtime::watcher::Event::InitDone => false,
         };
-        let should_publish = is_current && did_change;
+        let result = state.handle_event(&event);
+        match result {
+            Ok(true) => {
+                // Changes made - ensure we publish when we're ready
+                pending_changes = true;
+            }
+            Ok(false) => {
+                // No changes made
+            }
+            Err(error) => {
+                // Error when handling event
+                tracing::error!("error when handling node event: {error:?}");
+            }
+        };
 
+        let should_publish = is_current && pending_changes;
         if should_publish {
+            // The watcher is up-to-date with current events and we have
+            // some pending changes, so publish them
+
             tracing::info!("(todo) publish DNS for nodes: {:?}", state.nodes);
+
+            pending_changes = false;
         }
     }
 
