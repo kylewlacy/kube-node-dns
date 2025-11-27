@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use clap::Parser;
 use futures::StreamExt as _;
@@ -359,6 +359,15 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
             // The watcher is up-to-date with current events and we have
             // some pending changes, so publish them
 
+            for (hosted_zone_id, domains) in &state.domains_by_hosted_zone_id {
+                publish_dns_records_for_nodes_in_route53(
+                    &route53,
+                    &hosted_zone_id,
+                    &domains,
+                    state.nodes.values(),
+                )
+                .await?;
+            }
             tracing::info!(
                 domains = ?state.domains_by_hosted_zone_id,
                 nodes = ?state.nodes,
@@ -512,17 +521,28 @@ impl NodeState {
             .annotations
             .as_ref()
             .and_then(|annotations| annotations.get("external-dns.alpha.kubernetes.io/target"));
-        let Some(ips) = ips else {
+        let ips = ips.iter().flat_map(|ips| ips.split(','));
+
+        let mut ipv4s = vec![];
+        let mut ipv6s = vec![];
+        for ip in ips {
+            let ip: std::net::IpAddr = ip
+                .parse()
+                .into_diagnostic()
+                .wrap_err_with(|| format!("invalid IP for node {name}: {ip}"))?;
+            match ip {
+                std::net::IpAddr::V4(ip) => {
+                    ipv4s.push(ip);
+                }
+                std::net::IpAddr::V6(ip) => {
+                    ipv6s.push(ip);
+                }
+            }
+        }
+
+        if ipv4s.is_empty() && ipv6s.is_empty() {
             return Ok(Self::NoIps);
-        };
-        let ips = ips
-            .split(',')
-            .map(|ip| {
-                ip.parse()
-                    .into_diagnostic()
-                    .wrap_err_with(|| format!("invalid IP for node {name}: {ip}"))
-            })
-            .collect::<miette::Result<Vec<std::net::IpAddr>>>()?;
+        }
 
         let coordinates: Option<Coordinates> = node
             .metadata
@@ -536,7 +556,8 @@ impl NodeState {
 
         Ok(Self::Publish(NodePublishState {
             name: name.clone(),
-            ips,
+            ipv4s,
+            ipv6s,
             coordinates,
         }))
     }
@@ -545,14 +566,21 @@ impl NodeState {
 #[derive(Debug, PartialEq)]
 struct NodePublishState {
     name: String,
-    ips: Vec<std::net::IpAddr>,
+    ipv4s: Vec<std::net::Ipv4Addr>,
+    ipv6s: Vec<std::net::Ipv6Addr>,
     coordinates: Option<Coordinates>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Coordinates {
-    latitude: f32,
-    longitude: f32,
+    latitude: String,
+    longitude: String,
+}
+
+impl std::fmt::Display for Coordinates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{}", self.latitude, self.longitude)
+    }
 }
 
 impl std::str::FromStr for Coordinates {
@@ -561,11 +589,9 @@ impl std::str::FromStr for Coordinates {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.split_once(',')
             .and_then(|(lat, lon)| {
-                let latitude: f32 = lat.parse().ok()?;
-                let longitude: f32 = lon.parse().ok()?;
                 Some(Self {
-                    latitude,
-                    longitude,
+                    latitude: lat.to_string(),
+                    longitude: lon.to_string(),
                 })
             })
             .wrap_err_with(|| {
@@ -573,6 +599,17 @@ impl std::str::FromStr for Coordinates {
                     "invalid coordinates: expected string of the format '<lat>,<lon>', got: {s:?}"
                 )
             })
+    }
+}
+
+impl TryFrom<Coordinates> for aws_sdk_route53::types::Coordinates {
+    type Error = aws_sdk_route53::error::BuildError;
+
+    fn try_from(value: Coordinates) -> Result<Self, Self::Error> {
+        Self::builder()
+            .latitude(value.latitude)
+            .longitude(value.longitude)
+            .build()
     }
 }
 
@@ -615,6 +652,183 @@ fn find_hosted_zone_for_domain(
         .max_by_key(|hosted_zone_domain| hosted_zone_domain.hosted_zone_name.len())
         .wrap_err_with(|| format!("no hosted zone found for domain: {domain}"))?;
     Ok(hosted_zone_domain)
+}
+
+async fn publish_dns_records_for_nodes_in_route53(
+    route53: &aws_sdk_route53::Client,
+    hosted_zone_id: &str,
+    records: &[HostedZoneDomain],
+    nodes: impl Iterator<Item = &NodePublishState> + Clone,
+) -> miette::Result<()> {
+    let record_names = records
+        .iter()
+        .map(|record| &*record.domain)
+        .collect::<HashSet<_>>();
+
+    let mut target_record_sets = HashMap::<ResourceRecordSetKey, ResourceRecordSetValue>::new();
+    for record in records {
+        for node in nodes.clone() {
+            let key = ResourceRecordSetKey {
+                domain: record.domain.clone(),
+                coordinates: node.coordinates.clone(),
+            };
+            target_record_sets
+                .entry(key.clone())
+                .or_default()
+                .ipv4s
+                .extend(node.ipv4s.iter().copied());
+            target_record_sets
+                .entry(key)
+                .or_default()
+                .ipv6s
+                .extend(node.ipv6s.iter().copied());
+        }
+    }
+
+    let mut current_record_sets =
+        list_route53_resource_record_sets(route53, hosted_zone_id).await?;
+    current_record_sets.retain(|record_set| {
+        // Filter to only existing A / AAAA records
+        let name = match record_set.name.rsplit_once('.') {
+            Some((name, "")) => name,
+            _ => &record_set.name,
+        };
+        let is_a_or_aaaa = matches!(
+            record_set.r#type,
+            aws_sdk_route53::types::RrType::A | aws_sdk_route53::types::RrType::Aaaa
+        );
+        is_a_or_aaaa && record_names.contains(name)
+    });
+
+    let mut new_record_sets = vec![];
+    for (key, value) in target_record_sets {
+        let set_identifier = if let Some(coordinates) = &key.coordinates {
+            Some(format!("geoproximity-coords:{coordinates}"))
+        } else {
+            None
+        };
+        let geo_proximity_location = if let Some(coordinates) = &key.coordinates {
+            let coordinates = coordinates.clone().try_into().into_diagnostic()?;
+            Some(
+                aws_sdk_route53::types::GeoProximityLocation::builder()
+                    .coordinates(coordinates)
+                    .build(),
+            )
+        } else {
+            None
+        };
+
+        if !value.ipv4s.is_empty() {
+            let new_record_set = aws_sdk_route53::types::ResourceRecordSet::builder()
+                .name(&key.domain)
+                .r#type(aws_sdk_route53::types::RrType::A)
+                .set_set_identifier(set_identifier.clone())
+                .set_geo_proximity_location(geo_proximity_location.clone())
+                .ttl(300)
+                .build()
+                .into_diagnostic()?;
+            new_record_sets.push(new_record_set)
+        }
+
+        if !value.ipv6s.is_empty() {
+            let new_record_set = aws_sdk_route53::types::ResourceRecordSet::builder()
+                .name(&key.domain)
+                .r#type(aws_sdk_route53::types::RrType::Aaaa)
+                .set_set_identifier(set_identifier)
+                .set_geo_proximity_location(geo_proximity_location)
+                .ttl(300)
+                .build()
+                .into_diagnostic()?;
+            new_record_sets.push(new_record_set)
+        }
+    }
+
+    let changes = current_record_sets
+        .into_iter()
+        .map(|record_set| {
+            aws_sdk_route53::types::Change::builder()
+                .action(aws_sdk_route53::types::ChangeAction::Delete)
+                .resource_record_set(record_set)
+                .build()
+                .into_diagnostic()
+        })
+        .chain(new_record_sets.into_iter().map(|record_set| {
+            aws_sdk_route53::types::Change::builder()
+                .action(aws_sdk_route53::types::ChangeAction::Create)
+                .resource_record_set(record_set)
+                .build()
+                .into_diagnostic()
+        }))
+        .collect::<miette::Result<Vec<_>>>()?;
+    let change_batch = aws_sdk_route53::types::ChangeBatch::builder()
+        .set_changes(Some(changes))
+        .build()
+        .into_diagnostic()?;
+
+    tracing::debug!("sending route53 change batch:\n{change_batch:#?}");
+
+    route53
+        .change_resource_record_sets()
+        .hosted_zone_id(hosted_zone_id)
+        .change_batch(change_batch)
+        .send()
+        .await
+        .into_diagnostic()?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResourceRecordSetKey {
+    domain: String,
+    coordinates: Option<Coordinates>,
+}
+
+#[derive(Debug, Default)]
+struct ResourceRecordSetValue {
+    ipv4s: BTreeSet<std::net::Ipv4Addr>,
+    ipv6s: BTreeSet<std::net::Ipv6Addr>,
+}
+
+async fn list_route53_resource_record_sets(
+    route53: &aws_sdk_route53::Client,
+    hosted_zone_id: &str,
+) -> miette::Result<Vec<aws_sdk_route53::types::ResourceRecordSet>> {
+    let mut all_record_sets = vec![];
+
+    let mut next_record_name = None;
+    let mut next_record_type = None;
+    let mut next_record_identifier = None;
+    loop {
+        let record_sets = route53
+            .list_resource_record_sets()
+            .hosted_zone_id(hosted_zone_id)
+            .set_start_record_name(next_record_name)
+            .set_start_record_type(next_record_type)
+            .set_start_record_identifier(next_record_identifier)
+            .send()
+            .await
+            .into_diagnostic()?;
+
+        all_record_sets.extend(record_sets.resource_record_sets);
+
+        if record_sets.is_truncated {
+            break;
+        }
+
+        next_record_name = record_sets.next_record_name;
+        next_record_type = record_sets.next_record_type;
+        next_record_identifier = record_sets.next_record_identifier;
+
+        miette::ensure!(
+            next_record_name.is_some()
+                || next_record_type.is_some()
+                || next_record_identifier.is_some(),
+            "Route53 record set result was truncated, but we have no next value"
+        );
+    }
+
+    Ok(all_record_sets)
 }
 
 fn remove_fqdn_trailing_dot(domain: &str) -> &str {
