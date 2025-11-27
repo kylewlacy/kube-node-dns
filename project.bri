@@ -1,5 +1,6 @@
 import * as std from "std";
 import { cargoBuild } from "rust";
+import caCertificates from "ca_certificates";
 
 export default function kubeNodeAnnotateIps(): std.Recipe<std.Directory> {
   return cargoBuild({
@@ -8,6 +9,6 @@ export default function kubeNodeAnnotateIps(): std.Recipe<std.Directory> {
 }
 
 export const container = std.ociContainerImage({
-  recipe: kubeNodeAnnotateIps,
+  recipe: std.merge(kubeNodeAnnotateIps, caCertificates),
   entrypoint: ["bin/kube-node-annotate-ips"],
 });

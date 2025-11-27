@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "ca_certificates": "0a623453244bb6934cf0fb45b079506255859af3ed9869dfec45fe394b4a335f",
     "rust": "861c2953eb9591cce1145b0a78ad29acf23a4033dd8197bd5fc6b33ef3d30072",
     "std": "85ae365cb5df686f23040da55e0036b6f2c83e82f5eb21a01c55d4fd598da1e9"
   }
