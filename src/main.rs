@@ -280,10 +280,15 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
         ));
     }
 
-    let domains = domains
-        .iter()
-        .map(|domain| find_hosted_zone_for_domain(&public_hosted_zones, domain))
-        .collect::<miette::Result<Vec<_>>>()?;
+    let mut hosted_zone_domains_by_hosted_zone_id = HashMap::<String, Vec<_>>::new();
+    for domain in domains {
+        let hosted_zone_domain = find_hosted_zone_for_domain(&public_hosted_zones, domain)?;
+        let hosted_zone_id = &hosted_zone_domain.hosted_zone.id;
+        hosted_zone_domains_by_hosted_zone_id
+            .entry(hosted_zone_id.clone())
+            .or_default()
+            .push(hosted_zone_domain);
+    }
 
     let kube = kube::Client::try_default()
         .await
@@ -292,7 +297,7 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
     let nodes = kube::Api::<Node>::all(kube);
 
     let mut state = DnsPublisher {
-        domains,
+        hosted_zone_domains_by_hosted_zone_id,
         nodes: HashMap::new(),
     };
     let mut pending_changes = false;
@@ -355,13 +360,19 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
             // The watcher is up-to-date with current events and we have
             // some pending changes, so publish them
 
-            for domain in &state.domains {
+            for (hosted_zone_id, domains) in &state.hosted_zone_domains_by_hosted_zone_id {
                 tracing::info!(
-                    domain = domain.domain,
-                    hosted_zone_id = domain.hosted_zone.id,
-                    record_name = domain.record_name,
-                    "(todo) publish DNS for nodes: {:?}",
-                    state.nodes
+                    hosted_zone_id,
+                    domains = ?domains
+                        .iter()
+                        .map(|domain| &domain.domain)
+                        .collect::<Vec<_>>(),
+                    record_names = ?domains
+                        .iter()
+                        .map(|domain| &domain.record_name)
+                        .collect::<Vec<_>>(),
+                    nodes = ?state.nodes,
+                    "(todo) publish DNS for nodes",
                 );
             }
 
@@ -376,7 +387,7 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
 
 struct DnsPublisher {
     nodes: HashMap<String, NodePublishState>,
-    domains: Vec<HostedZoneDomain>,
+    hosted_zone_domains_by_hosted_zone_id: HashMap<String, Vec<HostedZoneDomain>>,
 }
 
 impl DnsPublisher {
