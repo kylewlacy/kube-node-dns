@@ -770,6 +770,57 @@ async fn publish_dns_records_for_nodes_in_route53(
         }
     }
 
+    tracing::debug!(
+        hosted_zone_id,
+        records_to_delete = ?current_record_sets
+            .iter()
+            .map(|record_set| {
+                let values = record_set
+                    .resource_records()
+                    .iter()
+                    .map(|record| record.value())
+                    .collect::<Vec<_>>();
+                if let Some(set_identifier) = &record_set.set_identifier {
+                    format!(
+                        "{} {set_identifier} {} {values:?}",
+                        record_set.name,
+                        record_set.r#type.as_str()
+                    )
+                } else {
+                    format!(
+                        "{} {} {values:?}",
+                        record_set.name,
+                        record_set.r#type.as_str()
+                    )
+                }
+            })
+            .collect::<Vec<_>>(),
+        records_to_create = ?new_record_sets
+            .iter()
+            .map(|record_set| {
+                let values = record_set
+                    .resource_records()
+                    .iter()
+                    .map(|record| record.value())
+                    .collect::<Vec<_>>();
+                if let Some(set_identifier) = &record_set.set_identifier {
+                    format!(
+                        "{} {set_identifier} {} {values:?}",
+                        record_set.name,
+                        record_set.r#type.as_str()
+                    )
+                } else {
+                    format!(
+                        "{} {} {values:?}",
+                        record_set.name,
+                        record_set.r#type.as_str()
+                    )
+                }
+            })
+            .collect::<Vec<_>>(),
+        "sending Route53 changes"
+    );
+
     let changes = current_record_sets
         .into_iter()
         .map(|record_set| {
@@ -791,8 +842,6 @@ async fn publish_dns_records_for_nodes_in_route53(
         .set_changes(Some(changes))
         .build()
         .into_diagnostic()?;
-
-    tracing::debug!("sending route53 change batch:\n{change_batch:#?}");
 
     route53
         .change_resource_record_sets()
