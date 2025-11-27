@@ -724,9 +724,20 @@ async fn publish_dns_records_for_nodes_in_route53(
         };
 
         if !value.ipv4s.is_empty() {
+            let resource_records = value
+                .ipv4s
+                .iter()
+                .map(|ip| {
+                    aws_sdk_route53::types::ResourceRecord::builder()
+                        .value(ip.to_string())
+                        .build()
+                        .into_diagnostic()
+                })
+                .collect::<miette::Result<_>>()?;
             let new_record_set = aws_sdk_route53::types::ResourceRecordSet::builder()
                 .name(&key.domain)
                 .r#type(aws_sdk_route53::types::RrType::A)
+                .set_resource_records(Some(resource_records))
                 .set_set_identifier(set_identifier.clone())
                 .set_geo_proximity_location(geo_proximity_location.clone())
                 .ttl(300)
@@ -736,9 +747,20 @@ async fn publish_dns_records_for_nodes_in_route53(
         }
 
         if !value.ipv6s.is_empty() {
+            let resource_records = value
+                .ipv6s
+                .iter()
+                .map(|ip| {
+                    aws_sdk_route53::types::ResourceRecord::builder()
+                        .value(ip.to_string())
+                        .build()
+                        .into_diagnostic()
+                })
+                .collect::<miette::Result<Vec<_>>>()?;
             let new_record_set = aws_sdk_route53::types::ResourceRecordSet::builder()
                 .name(&key.domain)
                 .r#type(aws_sdk_route53::types::RrType::Aaaa)
+                .set_resource_records(Some(resource_records))
                 .set_set_identifier(set_identifier)
                 .set_geo_proximity_location(geo_proximity_location)
                 .ttl(300)
