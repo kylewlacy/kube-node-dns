@@ -355,7 +355,15 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
             // The watcher is up-to-date with current events and we have
             // some pending changes, so publish them
 
-            tracing::info!("(todo) publish DNS for nodes: {:?}", state.nodes);
+            for domain in &state.domains {
+                tracing::info!(
+                    domain = domain.domain,
+                    hosted_zone_id = domain.hosted_zone.id,
+                    record_name = domain.record_name,
+                    "(todo) publish DNS for nodes: {:?}",
+                    state.nodes
+                );
+            }
 
             pending_changes = false;
         }
