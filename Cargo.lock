@@ -1576,7 +1576,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kube-node-annotate-ips"
+name = "kube-node-dns"
 version = "0.1.0"
 dependencies = [
  "aws-config",

@@ -7,7 +7,7 @@ use k8s_openapi::api::core::v1::Node;
 use miette::{Context as _, IntoDiagnostic as _};
 use network_interface::NetworkInterfaceConfig as _;
 
-const FIELD_MANAGER_NAME: &str = "kube-node-annotate-ips";
+const FIELD_MANAGER_NAME: &str = "kube-node-dns";
 
 const MAX_RETRIES: u32 = 10;
 

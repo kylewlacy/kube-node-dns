@@ -2,13 +2,13 @@ import * as std from "std";
 import { cargoBuild } from "rust";
 import caCertificates from "ca_certificates";
 
-export default function kubeNodeAnnotateIps(): std.Recipe<std.Directory> {
+export default function kubeNodeDns(): std.Recipe<std.Directory> {
   return cargoBuild({
     source: Brioche.glob("Cargo.lock", "Cargo.toml", "src"),
   });
 }
 
 export const container = std.ociContainerImage({
-  recipe: std.merge(kubeNodeAnnotateIps, caCertificates),
-  entrypoint: ["bin/kube-node-annotate-ips"],
+  recipe: std.merge(kubeNodeDns, caCertificates),
+  entrypoint: ["bin/kube-node-dns"],
 });
