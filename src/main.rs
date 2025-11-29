@@ -15,9 +15,8 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Parser)]
 enum Command {
-    ListIps,
-    Once,
-    Repeat {
+    ListNodeIps,
+    AnnotateNodeIps {
         every: String,
     },
     PublishDns {
@@ -58,16 +57,13 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(command: Command) -> miette::Result<()> {
     match command {
-        Command::ListIps => {
+        Command::ListNodeIps => {
             let ips = get_ips().await?;
             for ip in ips {
                 println!("{ip}");
             }
         }
-        Command::Once => {
-            update_nodes().await?;
-        }
-        Command::Repeat { every } => {
+        Command::AnnotateNodeIps { every } => {
             let every = humantime::parse_duration(&every)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("invalid value for repeat: {every:?}"))?;
