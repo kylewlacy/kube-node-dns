@@ -13,15 +13,29 @@ const MAX_RETRIES: u32 = 10;
 
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Create DNS records for select Kubernetes nodes based on nodes' public
+/// IP addresses
 #[derive(Debug, Parser)]
 enum Command {
+    /// Preview the public IP addresses discovered from the current node without
+    /// publishing them
     ListNodeIps,
+
+    /// Update the annotations from the current node (according to $KUBE_NODE_NAME)
+    /// based on public IPs across all interfaces
     AnnotateNodeIps {
+        /// How often to re-check public IPs. Example: `5m`
         every: String,
     },
+
+    /// Find annotations from all nodes and publish DNS records in Route 53
     PublishDns {
+        /// One or more domains to associate with nodes. Can be specified
+        /// multiple times to publish multiple domains
         #[arg(long = "domain", num_args(1..))]
         domains: Vec<String>,
+
+        /// Label selector to limit which nodes are published
         #[arg(long)]
         node_label_selector: Option<String>,
     },
@@ -68,7 +82,7 @@ async fn run(command: Command) -> miette::Result<()> {
                 .into_diagnostic()
                 .wrap_err_with(|| format!("invalid value for repeat: {every:?}"))?;
 
-            update_nodes_repeatedly(every).await?;
+            annotate_node_repeatedly(every).await?;
         }
         Command::PublishDns {
             domains,
@@ -81,6 +95,12 @@ async fn run(command: Command) -> miette::Result<()> {
     Ok(())
 }
 
+/// Find all global IPv4 / IPv6 addresses across all network interfaces for
+/// the current node.
+///
+/// This finds all IPs across all interfaces, then filters to those in a
+/// global IP range, i.e. not for private use, not CGNAT, not localhost, etc.
+/// This includes both IPv4 and IPv6 addresses.
 async fn get_ips() -> miette::Result<BTreeSet<std::net::IpAddr>> {
     let global_ips = tokio::task::spawn_blocking(|| {
         let mut global_ips = BTreeSet::new();
@@ -117,7 +137,9 @@ async fn get_ips() -> miette::Result<BTreeSet<std::net::IpAddr>> {
     Ok(global_ips)
 }
 
-async fn update_nodes() -> miette::Result<()> {
+/// Annotate the current node (based on the `$KUBE_NODE_NAME` env var) with
+/// the global IPs returned from [`get_ips`].
+async fn annotate_node() -> miette::Result<()> {
     let node_name = std::env::var("KUBE_NODE_NAME")
         .into_diagnostic()
         .wrap_err("$KUBE_NODE_NAME must be set")?;
@@ -235,13 +257,18 @@ fn set_annotation(
     true
 }
 
-async fn update_nodes_repeatedly(every: std::time::Duration) -> miette::Result<()> {
+/// Annotate the current node (based on the `$KUBE_NODE_NAME` env var) with
+/// the global IPs returned from [`get_ips`], repeatedly.
+///
+/// After each update, this function will sleep for the duration specified
+/// by `every`, then re-check the IPs again.
+async fn annotate_node_repeatedly(every: std::time::Duration) -> miette::Result<()> {
     let mut shutdown_signal = shutdown_signal();
 
     tracing::info!("updating IPs every {}", humantime::format_duration(every));
 
     loop {
-        update_nodes().await?;
+        annotate_node().await?;
 
         tokio::select! {
             result = &mut shutdown_signal => {
@@ -258,6 +285,12 @@ async fn update_nodes_repeatedly(every: std::time::Duration) -> miette::Result<(
     }
 }
 
+/// Publish DNS records for all nodes (filtered by `node_selector`) for each
+/// domain specified by `domains` via Route 53.
+///
+/// `domains` should be a list of domain names (FQDNs without the trailing dot).
+/// Publishes A and AAAA records based on annotations created by [`annotate_node`].
+/// Existing A and AAAA records for each specified domain are removed first.
 async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> miette::Result<()> {
     let aws_config = aws_config::load_from_env().await;
     let route53 = aws_sdk_route53::Client::new(&aws_config);
@@ -814,6 +847,10 @@ async fn publish_dns_records_for_nodes_in_route53(
         "sending Route53 changes"
     );
 
+    // Build a change batch Route 53. To simplify the logic, we submit
+    // a "delete" change for each existing A / AAAA record, plus a "create"
+    // change for each desired A / AAAA record. This happens transactionally,
+    // so the end result is to create/update/delete records as needed.
     let changes = current_record_sets
         .into_iter()
         .map(|record_set| {
