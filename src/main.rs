@@ -369,8 +369,8 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
             for (hosted_zone_id, domains) in &state.domains_by_hosted_zone_id {
                 publish_dns_records_for_nodes_in_route53(
                     &route53,
-                    &hosted_zone_id,
-                    &domains,
+                    hosted_zone_id,
+                    domains,
                     state.nodes.values(),
                 )
                 .await?;
@@ -606,11 +606,9 @@ impl std::str::FromStr for Coordinates {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.split_once(',')
-            .and_then(|(lat, lon)| {
-                Some(Self {
-                    latitude: lat.to_string(),
-                    longitude: lon.to_string(),
-                })
+            .map(|(lat, lon)| Self {
+                latitude: lat.to_string(),
+                longitude: lon.to_string(),
             })
             .wrap_err_with(|| {
                 format!(
@@ -717,11 +715,10 @@ async fn publish_dns_records_for_nodes_in_route53(
 
     let mut new_record_sets = vec![];
     for (key, value) in target_record_sets {
-        let set_identifier = if let Some(coordinates) = &key.coordinates {
-            Some(format!("geoproximity-coords:{coordinates}"))
-        } else {
-            None
-        };
+        let set_identifier = key
+            .coordinates
+            .as_ref()
+            .map(|coordinates| format!("geoproximity-coords:{coordinates}"));
         let geo_proximity_location = if let Some(coordinates) = &key.coordinates {
             let coordinates = coordinates.clone().try_into().into_diagnostic()?;
             Some(
