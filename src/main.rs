@@ -13,6 +13,10 @@ const MAX_RETRIES: u32 = 10;
 
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
+const KUBE_NODE_ANNOTATION_IPS: &str = "kube-node-dns.kyle.space/node-ips";
+const KUBE_NODE_ANNOTATION_COORDINATES: &str =
+    "kube-node-dns.kyle.space/aws-geoproximity-coordinates";
+
 /// Create DNS records for select Kubernetes nodes based on nodes' public
 /// IP addresses
 #[derive(Debug, Parser)]
@@ -143,9 +147,6 @@ async fn annotate_node() -> miette::Result<()> {
     let node_name = std::env::var("KUBE_NODE_NAME")
         .into_diagnostic()
         .wrap_err("$KUBE_NODE_NAME must be set")?;
-    let node_annotation_ips = std::env::var("KUBE_NODE_ANNOTATION_IPS")
-        .into_diagnostic()
-        .wrap_err("$KUBE_NODE_ANNOTATION_IPS not set")?;
 
     let kube = kube::Client::try_default()
         .await
@@ -168,18 +169,18 @@ async fn annotate_node() -> miette::Result<()> {
         let global_ips = get_ips().await?;
         let global_ip_list = global_ips.join_with(",").to_string();
 
-        if set_annotation(node_entry, &node_annotation_ips, &global_ip_list) {
+        if set_annotation(node_entry, KUBE_NODE_ANNOTATION_IPS, &global_ip_list) {
             tracing::info!(
                 node = node_name,
                 global_ip_list,
-                annotation = node_annotation_ips,
+                annotation = KUBE_NODE_ANNOTATION_IPS,
                 "updated node annotation with IPs"
             );
         } else {
             tracing::info!(
                 node = node_name,
                 global_ip_list,
-                annotation = node_annotation_ips,
+                annotation = KUBE_NODE_ANNOTATION_IPS,
                 "node IP annotation already up-to-date"
             );
         }
@@ -531,7 +532,7 @@ impl NodeState {
             .metadata
             .annotations
             .as_ref()
-            .and_then(|annotations| annotations.get("external-dns.alpha.kubernetes.io/target"));
+            .and_then(|annotations| annotations.get(KUBE_NODE_ANNOTATION_IPS));
         let ips = ips.iter().flat_map(|ips| ips.split(','));
 
         let mut ipv4s = vec![];
@@ -559,9 +560,7 @@ impl NodeState {
             .metadata
             .annotations
             .as_ref()
-            .and_then(|annotations| {
-                annotations.get("external-dns.alpha.kubernetes.io/aws-geoproximity-coordinates")
-            })
+            .and_then(|annotations| annotations.get(KUBE_NODE_ANNOTATION_COORDINATES))
             .map(|coordinates| coordinates.parse())
             .transpose()?;
 
