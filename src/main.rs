@@ -377,12 +377,8 @@ async fn run_dns_publisher(domains: &[String], node_selector: Option<&str>) -> m
             }
 
             tracing::info!(
-                domains = ?state
-                    .domains_by_hosted_zone_id
-                    .values()
-                    .flatten()
-                    .map(|domain| &domain.domain)
-                    .collect::<Vec<_>>(),
+                domains = ?state.domains(),
+                nodes = ?state.node_names(),
                 "finished publishing DNS records to Route53"
             );
 
@@ -482,6 +478,18 @@ impl DnsPublisher {
                 Ok(false)
             }
         }
+    }
+
+    fn domains(&self) -> Vec<&str> {
+        self.domains_by_hosted_zone_id
+            .values()
+            .flatten()
+            .map(|domain| &*domain.domain)
+            .collect::<Vec<_>>()
+    }
+
+    fn node_names(&self) -> Vec<&str> {
+        self.nodes.keys().map(|node_name| &**node_name).collect()
     }
 }
 
